@@ -4,17 +4,79 @@
     // ==================== Storage ====================
     const STORAGE_KEY = 'lovely_phoenix_entries';
     const AI_CONFIG_KEY = 'lovely_phoenix_ai_config';
+    const API_BASE_KEY = 'lovely_phoenix_api_base';
 
     const DEFAULT_SYSTEM_PROMPT = '你是一位细腻的日记作家。根据以下一天的时间线记录，帮我写一篇流畅自然的中文日记。要像真人写的一样，有感受有细节，不要像流水账。按时间顺序叙述，并适当加入内心感受和思考。字数400-600字。直接输出日记内容，不需要标题。';
 
-    function loadEntries() {
+    function getAPIBase() {
+        const stored = localStorage.getItem(API_BASE_KEY);
+        return stored || 'http://localhost:3000';
+    }
+
+    // localStorage fallback (offline / no server)
+    function loadEntriesLocal() {
         try {
             return JSON.parse(localStorage.getItem(STORAGE_KEY)) || [];
         } catch { return []; }
     }
 
-    function saveEntries() {
+    function saveEntriesLocal() {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(entries));
+    }
+
+    async function loadEntries() {
+        try {
+            const resp = await fetch(`${getAPIBase()}/api/entries`);
+            if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
+            const data = await resp.json();
+            return data;
+        } catch (err) {
+            console.warn('API unavailable, using local storage:', err.message);
+            return loadEntriesLocal();
+        }
+    }
+
+    async function saveEntryToAPI(entry) {
+        try {
+            const resp = await fetch(`${getAPIBase()}/api/entries`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(entry)
+            });
+            if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
+            saveEntriesLocal(); // keep local backup in sync
+        } catch (err) {
+            console.warn('API unavailable, saved locally:', err.message);
+            saveEntriesLocal();
+        }
+    }
+
+    async function updateEntryAPI(entry) {
+        try {
+            const resp = await fetch(`${getAPIBase()}/api/entries/${entry.id}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(entry)
+            });
+            if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
+            saveEntriesLocal();
+        } catch (err) {
+            console.warn('API unavailable, saved locally:', err.message);
+            saveEntriesLocal();
+        }
+    }
+
+    async function deleteEntryAPI(id) {
+        try {
+            const resp = await fetch(`${getAPIBase()}/api/entries/${id}`, {
+                method: 'DELETE'
+            });
+            if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
+            saveEntriesLocal();
+        } catch (err) {
+            console.warn('API unavailable, saved locally:', err.message);
+            saveEntriesLocal();
+        }
     }
 
     function loadAIConfig() {
@@ -38,7 +100,7 @@
     }
 
     // ==================== State ====================
-    let entries = loadEntries();
+    let entries = [];
     let selectedDate = dateStr(new Date());
     let editingId = null;
 
@@ -89,9 +151,12 @@
     document.body.appendChild(elToast);
 
     // ==================== Constants ====================
-    const HOUR_HEIGHT = 64;       // px per hour on the timeline
+    const BASE_HOUR_HEIGHT = 64;  // px per hour at 1x zoom
     const TOP_PAD = 20;           // top padding inside canvas
     const TIMELINE_LEFT = 56;     // matches CSS --timeline-left
+    const ZOOM_LEVELS = [0.5, 0.75, 1.0, 1.5, 2.0, 3.0];
+    let zoomLevel = 1.0;
+    let HOUR_HEIGHT = BASE_HOUR_HEIGHT;  // dynamic, updated by zoom
 
     // ==================== Helpers ====================
     function timeToY(isoStr) {
@@ -134,6 +199,37 @@
         const h = String(date.getHours()).padStart(2, '0');
         const m = String(date.getMinutes()).padStart(2, '0');
         return `${dateStr(date)}T${h}:${m}`;
+    }
+
+    // ==================== Zoom ====================
+    function setZoom(level) {
+        const viewH = elViewport.clientHeight;
+        const scrollMid = elViewport.scrollTop + viewH / 2;
+        const ratio = level / zoomLevel;
+        zoomLevel = level;
+        HOUR_HEIGHT = Math.round(BASE_HOUR_HEIGHT * zoomLevel);
+        updateZoomUI();
+        renderAll();
+        elViewport.scrollTop = Math.max(0, scrollMid * ratio - viewH / 2);
+    }
+
+    function zoomIn() {
+        const idx = ZOOM_LEVELS.indexOf(zoomLevel);
+        if (idx < ZOOM_LEVELS.length - 1) setZoom(ZOOM_LEVELS[idx + 1]);
+    }
+
+    function zoomOut() {
+        const idx = ZOOM_LEVELS.indexOf(zoomLevel);
+        if (idx > 0) setZoom(ZOOM_LEVELS[idx - 1]);
+    }
+
+    function updateZoomUI() {
+        const el = $('#zoom-label');
+        if (el) el.textContent = zoomLevel + 'x';
+        const btnIn = $('#zoom-in-btn');
+        const btnOut = $('#zoom-out-btn');
+        if (btnIn) btnIn.disabled = zoomLevel >= ZOOM_LEVELS[ZOOM_LEVELS.length - 1];
+        if (btnOut) btnOut.disabled = zoomLevel <= ZOOM_LEVELS[0];
     }
 
     // ==================== Render ====================
@@ -342,36 +438,72 @@
     }
 
     // ==================== CRUD ====================
-    function addEntry(title, note, timestamp) {
+    async function addEntry(title, note, timestamp) {
         const tsDate = dateStr(new Date(timestamp));
         const count = entries.filter(e => dateStr(new Date(e.timestamp)) === tsDate).length;
-        entries.push({
+        const entry = {
             id: Date.now().toString(36) + Math.random().toString(36).slice(2, 9),
             timestamp,
             title,
             note: note || null,
             createdAt: new Date().toISOString(),
             sortIndex: count
-        });
-        saveEntries();
+        };
+        entries.push(entry);
+        await saveEntryToAPI(entry);
         renderAll();
     }
 
-    function updateEntry(id, title, note, timestamp) {
+    async function updateEntry(id, title, note, timestamp) {
         const entry = entries.find(e => e.id === id);
         if (!entry) return;
         entry.title = title;
         entry.note = note || null;
         entry.timestamp = timestamp;
-        saveEntries();
+        await updateEntryAPI(entry);
         renderAll();
     }
 
-    function deleteEntry(id) {
+    async function deleteEntry(id) {
         entries = entries.filter(e => e.id !== id);
-        saveEntries();
+        await deleteEntryAPI(id);
         renderAll();
         toast('已删除');
+    }
+
+    // ==================== Export / Import ====================
+    function exportData() {
+        const blob = new Blob([JSON.stringify(entries, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `lovely-phoenix-backup-${selectedDate}.json`;
+        a.click();
+        URL.revokeObjectURL(url);
+        toast('数据已导出');
+    }
+
+    function importData(file) {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            try {
+                const data = JSON.parse(e.target.result);
+                if (!Array.isArray(data)) throw new Error('格式不正确');
+                // Merge: add entries that don't already exist
+                const existingIds = new Set(entries.map(e => e.id));
+                const newEntries = data.filter(e => !existingIds.has(e.id));
+                entries = [...entries, ...newEntries];
+                saveEntriesLocal();
+                // Push new entries to API
+                Promise.all(newEntries.map(e => saveEntryToAPI(e))).finally(() => {
+                    renderAll();
+                    toast(`已导入 ${newEntries.length} 条记录`);
+                });
+            } catch (err) {
+                toast('导入失败：' + err.message);
+            }
+        };
+        reader.readAsText(file);
     }
 
     // ==================== Toast ====================
@@ -384,7 +516,7 @@
     }
 
     // ==================== Actions ====================
-    function handleSave() {
+    async function handleSave() {
         const title = elEntryTitle.value.trim();
         if (!title) {
             elTitleError.classList.add('show');
@@ -395,25 +527,27 @@
         const timestamp = new Date(elEntryTime.value).toISOString();
 
         if (editingId) {
-            updateEntry(editingId, title, note, timestamp);
+            await updateEntry(editingId, title, note, timestamp);
             toast('已更新');
         } else {
-            addEntry(title, note, timestamp);
+            await addEntry(title, note, timestamp);
             toast('已添加');
         }
         closeSheet();
     }
 
-    function handleDelete() {
+    async function handleDelete() {
         if (!editingId) return;
         if (!confirm('确定删除这条记录吗？')) return;
-        deleteEntry(editingId);
+        await deleteEntry(editingId);
         closeSheet();
     }
 
     // ==================== Settings ====================
     function openSettingsSheet() {
         const config = getAIConfig();
+        const elApiBase = $('#api-base');
+        if (elApiBase) elApiBase.value = getAPIBase();
         elApiEndpoint.value = config.endpoint;
         elApiKey.value = config.apiKey;
         elApiModel.value = config.model;
@@ -603,6 +737,36 @@
     $('#diary-copy-btn').addEventListener('click', copyDiary);
     $('#diary-retry-btn').addEventListener('click', generateDiary);
 
+    // Zoom controls
+    $('#zoom-in-btn').addEventListener('click', zoomIn);
+    $('#zoom-out-btn').addEventListener('click', zoomOut);
+
+    // Zoom with Ctrl+scroll / pinch gesture
+    elViewport.addEventListener('wheel', (e) => {
+        if (e.ctrlKey || e.metaKey) {
+            e.preventDefault();
+            if (e.deltaY < 0) zoomIn();
+            else zoomOut();
+        }
+    }, { passive: false });
+
+    // Export / Import
+    $('#export-btn').addEventListener('click', exportData);
+    $('#import-btn').addEventListener('click', () => {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.json';
+        input.onchange = (e) => {
+            if (e.target.files[0]) importData(e.target.files[0]);
+        };
+        input.click();
+    });
+
+    // Settings — API base
+    $('#api-base').addEventListener('input', () => {
+        localStorage.setItem(API_BASE_KEY, $('#api-base').value.trim());
+    });
+
     // Keyboard
     document.addEventListener('keydown', (e) => {
         if (e.key === 'Escape') {
@@ -619,7 +783,9 @@
     });
 
     // ==================== Init ====================
-    function init() {
+    async function init() {
+        entries = await loadEntries();
+
         renderAll();
 
         // Refresh now-line position every minute when viewing today
