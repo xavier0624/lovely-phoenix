@@ -1,0 +1,17 @@
+{
+    "name": "Lovely Phoenix",
+    "short_name": "Phoenix",
+    "description": "记录每天的时光轨迹",
+    "start_url": "index.html",
+    "display": "standalone",
+    "background_color": "#1A1A2E",
+    "theme_color": "#1A1A2E",
+    "orientation": "portrait",
+    "icons": [
+        {
+            "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 200 200'><rect fill='%23EF955F' rx='40' width='200' height='200'/><text x='100' y='118' text-anchor='middle' fill='white' font-size='100' font-family='serif'>凤</text></svg>",
+            "sizes": "200x200",
+            "type": "image/svg+xml"
+        }
+    ]
+}
