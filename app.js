@@ -3,6 +3,9 @@
 
     // ==================== Storage ====================
     const STORAGE_KEY = 'lovely_phoenix_entries';
+    const AI_CONFIG_KEY = 'lovely_phoenix_ai_config';
+
+    const DEFAULT_SYSTEM_PROMPT = '你是一位细腻的日记作家。根据以下一天的时间线记录，帮我写一篇流畅自然的中文日记。要像真人写的一样，有感受有细节，不要像流水账。按时间顺序叙述，并适当加入内心感受和思考。字数400-600字。直接输出日记内容，不需要标题。';
 
     function loadEntries() {
         try {
@@ -12,6 +15,26 @@
 
     function saveEntries() {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(entries));
+    }
+
+    function loadAIConfig() {
+        try {
+            return JSON.parse(localStorage.getItem(AI_CONFIG_KEY)) || {};
+        } catch { return {}; }
+    }
+
+    function saveAIConfig(config) {
+        localStorage.setItem(AI_CONFIG_KEY, JSON.stringify(config));
+    }
+
+    function getAIConfig() {
+        const config = loadAIConfig();
+        return {
+            endpoint: config.endpoint || 'https://api.deepseek.com/v1',
+            apiKey: config.apiKey || '',
+            model: config.model || 'deepseek-chat',
+            systemPrompt: config.systemPrompt || DEFAULT_SYSTEM_PROMPT
+        };
     }
 
     // ==================== State ====================
@@ -47,6 +70,18 @@
     const elEntryNote = $('#entry-note');
     const elTitleError = $('#title-error');
     const elFormDeleteBtn = $('#form-delete-btn');
+
+    // Settings
+    const elSettingsSheet = $('#settings-sheet');
+    const elApiEndpoint = $('#api-endpoint');
+    const elApiKey = $('#api-key');
+    const elApiModel = $('#api-model');
+    const elApiPrompt = $('#api-prompt');
+
+    // Diary
+    const elDiaryModal = $('#diary-modal');
+    const elDiaryBody = $('#diary-body');
+    const elDiaryDate = $('#diary-date');
 
     // Toast
     const elToast = document.createElement('div');
@@ -376,6 +411,143 @@
         closeSheet();
     }
 
+    // ==================== Settings ====================
+    function openSettingsSheet() {
+        const config = getAIConfig();
+        elApiEndpoint.value = config.endpoint;
+        elApiKey.value = config.apiKey;
+        elApiModel.value = config.model;
+        elApiPrompt.value = config.systemPrompt === DEFAULT_SYSTEM_PROMPT ? '' : config.systemPrompt;
+        elOverlay.classList.add('active');
+        elSettingsSheet.classList.add('active');
+    }
+
+    function closeSettingsSheet() {
+        elOverlay.classList.remove('active');
+        elSettingsSheet.classList.remove('active');
+    }
+
+    function saveSettings() {
+        const config = {
+            endpoint: elApiEndpoint.value.trim() || 'https://api.deepseek.com/v1',
+            apiKey: elApiKey.value.trim(),
+            model: elApiModel.value.trim() || 'deepseek-chat',
+            systemPrompt: elApiPrompt.value.trim() || DEFAULT_SYSTEM_PROMPT
+        };
+        saveAIConfig(config);
+        closeSettingsSheet();
+        toast('设置已保存');
+    }
+
+    // ==================== AI Diary ====================
+    function openDiaryModal(dateStr_) {
+        elDiaryModal.classList.add('active');
+        elDiaryDate.textContent = formatShort(dateStr_);
+        generateDiary();
+    }
+
+    function closeDiaryModal() {
+        elDiaryModal.classList.remove('active');
+    }
+
+    async function generateDiary() {
+        const config = getAIConfig();
+        if (!config.apiKey) {
+            elDiaryBody.innerHTML = `
+                <div class="diary-error">
+                    <p>请先配置 AI API Key</p>
+                    <p style="font-size:13px;margin-top:4px;color:var(--text-muted);">点击右上角齿轮图标设置</p>
+                </div>`;
+            return;
+        }
+
+        // Get today's entries
+        const filtered = entries
+            .filter(e => dateStr(new Date(e.timestamp)) === selectedDate)
+            .sort((a, b) => {
+                const ta = new Date(a.timestamp).getTime();
+                const tb = new Date(b.timestamp).getTime();
+                if (ta !== tb) return ta - tb;
+                return (a.sortIndex || 0) - (b.sortIndex || 0);
+            });
+
+        if (filtered.length === 0) {
+            elDiaryBody.innerHTML = `
+                <div class="diary-error">
+                    <p>今天还没有任何记录</p>
+                    <p style="font-size:13px;margin-top:4px;color:var(--text-muted);">先记录一些时间线内容再生成日记</p>
+                </div>`;
+            return;
+        }
+
+        // Build prompt from entries
+        const lines = filtered.map(e => {
+            const time = formatTime(e.timestamp);
+            let line = `- ${time} ${e.title}`;
+            if (e.note) line += `\n  备注：${e.note}`;
+            return line;
+        });
+        const userPrompt = `今天的日期：${formatShort(selectedDate)}\n\n时间线记录：\n${lines.join('\n')}`;
+
+        // Show loading
+        elDiaryBody.innerHTML = `
+            <div class="diary-loading">
+                <div class="diary-loading-spinner"></div>
+                <p class="diary-loading-text">AI 正在为你写日记...</p>
+            </div>`;
+
+        try {
+            const response = await fetch(`${config.endpoint}/chat/completions`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${config.apiKey}`
+                },
+                body: JSON.stringify({
+                    model: config.model,
+                    messages: [
+                        { role: 'system', content: config.systemPrompt },
+                        { role: 'user', content: userPrompt }
+                    ],
+                    temperature: 0.8,
+                    max_tokens: 2048
+                })
+            });
+
+            if (!response.ok) {
+                const err = await response.text();
+                let errMsg = `API 请求失败 (${response.status})`;
+                try {
+                    const errJson = JSON.parse(err);
+                    if (errJson.error && errJson.error.message) errMsg = errJson.error.message;
+                } catch {}
+                throw new Error(errMsg);
+            }
+
+            const data = await response.json();
+            const content = data.choices[0].message.content;
+
+            elDiaryBody.innerHTML = `<div class="diary-content">${escapeHtml(content)}</div>`;
+        } catch (err) {
+            elDiaryBody.innerHTML = `
+                <div class="diary-error">
+                    <p>生成失败</p>
+                    <p style="font-size:13px;margin-top:8px;color:var(--text-muted);">${escapeHtml(err.message)}</p>
+                </div>`;
+        }
+    }
+
+    async function copyDiary() {
+        const contentEl = elDiaryBody.querySelector('.diary-content');
+        if (!contentEl) return;
+        try {
+            await navigator.clipboard.writeText(contentEl.textContent);
+            toast('日记已复制');
+        } catch {
+            toast('复制失败，请手动选择文字');
+        }
+    }
+
     // ==================== Date Nav ====================
     function goPrev() {
         const d = parseDate(selectedDate);
@@ -408,21 +580,42 @@
     $('#prev-day-btn').addEventListener('click', goPrev);
     $('#next-day-btn').addEventListener('click', goNext);
     $('#today-btn').addEventListener('click', goToday);
-    $('#overlay').addEventListener('click', closeSheet);
+    $('#overlay').addEventListener('click', () => {
+        closeSheet();
+        closeSettingsSheet();
+        closeDiaryModal();
+    });
     $('#sheet-close-btn').addEventListener('click', closeSheet);
     $('#btn-cancel').addEventListener('click', closeSheet);
     $('#btn-save').addEventListener('click', handleSave);
     $('#form-delete-btn').addEventListener('click', handleDelete);
 
+    // Settings
+    $('#settings-btn').addEventListener('click', openSettingsSheet);
+    $('#settings-close-btn').addEventListener('click', closeSettingsSheet);
+    $('#settings-cancel-btn').addEventListener('click', closeSettingsSheet);
+    $('#settings-save-btn').addEventListener('click', saveSettings);
+
+    // AI Diary
+    $('#ai-diary-btn').addEventListener('click', () => openDiaryModal(selectedDate));
+    $('#diary-close-btn').addEventListener('click', closeDiaryModal);
+    $('#diary-close-done-btn').addEventListener('click', closeDiaryModal);
+    $('#diary-copy-btn').addEventListener('click', copyDiary);
+    $('#diary-retry-btn').addEventListener('click', generateDiary);
+
     // Keyboard
     document.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape' && elSheet.classList.contains('active')) closeSheet();
+        if (e.key === 'Escape') {
+            if (elDiaryModal.classList.contains('active')) closeDiaryModal();
+            else if (elSheet.classList.contains('active')) closeSheet();
+            else if (elSettingsSheet.classList.contains('active')) closeSettingsSheet();
+        }
         if ((e.metaKey || e.ctrlKey) && e.key === 'n' && !elSheet.classList.contains('active')) {
             e.preventDefault();
             openAddSheet();
         }
-        if (e.key === 'ArrowLeft' && !elSheet.classList.contains('active')) goPrev();
-        if (e.key === 'ArrowRight' && !elSheet.classList.contains('active')) goNext();
+        if (e.key === 'ArrowLeft' && !elSheet.classList.contains('active') && !elSettingsSheet.classList.contains('active') && !elDiaryModal.classList.contains('active')) goPrev();
+        if (e.key === 'ArrowRight' && !elSheet.classList.contains('active') && !elSettingsSheet.classList.contains('active') && !elDiaryModal.classList.contains('active')) goNext();
     });
 
     // ==================== Init ====================

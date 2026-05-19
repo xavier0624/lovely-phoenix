@@ -1,4 +1,4 @@
-const CACHE_NAME = 'lovely-phoenix-v1';
+const CACHE_NAME = 'lovely-phoenix-v2';
 const ASSETS = ['index.html', 'style.css', 'app.js', 'manifest.json'];
 
 self.addEventListener('install', (event) => {
